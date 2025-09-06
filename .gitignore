@@ -1,0 +1,15 @@
+# deps & build
+node_modules/
+.next/
+out/
+dist/
+coverage/
+.turbo/
+.pnpm-store/
+
+# env & local
+.env
+.env.*.local
+*.log
+.DS_Store
+.vercel/
