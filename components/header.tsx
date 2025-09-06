@@ -10,13 +10,18 @@ import { hasStackEnv } from '@/lib/stack'
 
 function HeaderAuthed() {
   const user = useUser()
-  const app = useStackApp()
+  const app = useStackApp() 
   const router = useRouter()
   const [isDropdownOpen, setIsDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const handleSignOut = async () => {
-    await app.signOut()
+ if (user) {
+      await user.signOut()
+    } else if (app?.urls?.handler) {
+      // 未ログイン時フォールバック：StackのサインアウトURLへ
+      window.location.href = `${app.urls.handler}/sign-out`
+    }
     router.push('/')
     setIsDropdownOpen(false)
   }

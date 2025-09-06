@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs'; // （任意）cookies を使うなら nodejs を明示
 import { NextRequest, NextResponse } from "next/server";
 import { getStackServerApp } from "@/lib/stack";
 import { prisma } from "@/lib/prisma";

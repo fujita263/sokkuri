@@ -21,7 +21,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     });
     
     return (
-      <StackProvider app={app} lang="ja">
+      <StackProvider app={app} lang="ja-JP">
         {children}
       </StackProvider>
     )
