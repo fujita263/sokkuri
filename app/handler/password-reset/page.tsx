@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { useStackApp } from '@stackframe/stack'
 import Link from 'next/link'
+import { getErrorCode } from '@/lib/getErrorCode'   // 追加
 
 export default function PasswordResetPage() {
   const searchParams = useSearchParams()
@@ -39,14 +40,12 @@ export default function PasswordResetPage() {
       special: /[^A-Za-z0-9]/.test(password)
     }
 
-    // スコア計算
     if (checks.length) score++
     if (checks.lowercase) score++
     if (checks.uppercase) score++
     if (checks.numbers) score++
     if (checks.special) score++
 
-    // 強度メッセージと色の設定
     let message = ''
     let color = ''
     
@@ -103,17 +102,14 @@ export default function PasswordResetPage() {
     e.preventDefault()
     setError('')
 
-    // バリデーション
     if (password.length < 8) {
       setError('パスワードは8文字以上で設定してください')
       return
     }
-
     if (password !== confirmPassword) {
       setError('パスワードが一致しません')
       return
     }
-
     if (passwordStrength.score < 3) {
       setError('より強力なパスワードを設定してください')
       return
@@ -122,26 +118,24 @@ export default function PasswordResetPage() {
     setIsLoading(true)
 
     try {
-      // Stack Authのパスワードリセット実行
-      const result = await app.resetPassword({
-        code,
-        password
-      })
+      const result = await app.resetPassword({ code, password })
 
       if (result.status === 'ok') {
         setSuccess(true)
-        // 3秒後にログインページへリダイレクト
-        setTimeout(() => {
-          router.push('/auth/signin')
-        }, 3000)
+        setTimeout(() => { router.push('/auth/signin') }, 3000)
       } else {
         console.error('Password reset failed:', result.error)
-        if (result.error?.code === 'INVALID_PASSWORD_RESET_CODE') {
+
+        const code = getErrorCode(result.error)
+
+        if (code === 'INVALID_PASSWORD_RESET_CODE') {
           setError('リセットコードが無効または期限切れです。もう一度リセットをリクエストしてください。')
-        } else if (result.error?.code === 'PASSWORD_REQUIREMENTS_NOT_MET') {
+        } else if (code === 'PASSWORD_REQUIREMENTS_NOT_MET') {
           setError('パスワードが要件を満たしていません。より強力なパスワードを設定してください。')
+        } else if (code === 'RATE_LIMITED') {
+          setError('試行回数が多すぎます。しばらくしてから再度お試しください。')
         } else {
-          setError('パスワードのリセットに失敗しました。もう一度お試しください。')
+          setError(result.error?.message ?? 'パスワードのリセットに失敗しました。もう一度お試しください。')
         }
       }
     } catch (err: any) {
@@ -152,7 +146,6 @@ export default function PasswordResetPage() {
     }
   }
 
-  // 成功画面
   if (success) {
     return (
       <main className="min-h-screen flex items-start justify-center pt-24 px-4 bg-gradient-to-br from-slate-50 to-blue-50">
