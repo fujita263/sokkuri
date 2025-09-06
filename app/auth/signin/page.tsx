@@ -5,13 +5,7 @@ import { useStackApp, useUser } from '@stackframe/stack'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 
-function getErrorCode(err: unknown): string | undefined {
-  if (typeof err === 'object' && err !== null && 'code' in err) {
-    const code = (err as any).code
-    return typeof code === 'string' ? code : undefined
-  }
-  return undefined
-}
+import { getErrorCode } from "@/lib/getErrorCode"
 
 export default function SignInPage() {
   const app = useStackApp()
@@ -24,7 +18,7 @@ export default function SignInPage() {
 
   // 既ログインなら副作用内で遷移（レンダー中に push しない）
   useEffect(() => {
-    if (user) router.push('/dashboard')
+    if (user?.id) router.push('/dashboard')
   }, [user, router])
 
   const handleSubmit = async (e: React.FormEvent) => {
