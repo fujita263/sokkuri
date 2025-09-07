@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 // 事前計算/キャッシュ無効化（保険）
 export const dynamic = "force-dynamic";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: "2024-06-20" });
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!;
 
 /** ちょい待機 */
