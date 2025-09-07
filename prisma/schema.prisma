@@ -154,10 +154,8 @@ model AuditLog {
 
 model StripeEvent {
   id        String   @id @default(cuid())
-  eventId   String   @unique // Stripeのevent.id（ユニークで二重実行を防ぐ）
+  eventId   String   @unique
   type      String
   payload   Json
   createdAt DateTime @default(now())
-
-  @@index([type, createdAt])
 }
