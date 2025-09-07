@@ -2,40 +2,35 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { signTrialToken } from "@/lib/trialToken";
 
-// ★簡易版: 検証エンドポイントを使う（外部HTTP）。本番はJWK検証実装へ差し替え推奨
+// 検証API（簡易版）。本番はJWK検証に差し替え推奨
 async function verifyIdToken(idToken: string) {
+  const clientId = process.env.LINE_LOGIN_CHANNEL_ID;
+  if (!clientId) throw new Error("LINE_LOGIN_CHANNEL_ID missing");
   const params = new URLSearchParams();
   params.set("id_token", idToken);
-  params.set("client_id", process.env.LINE_LOGIN_CHANNEL_ID!); // = Channel ID
+  params.set("client_id", clientId);
   const res = await fetch("https://api.line.me/oauth2/v2.1/verify", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: params.toString(),
   });
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`verify failed: ${res.status} ${t}`);
-  }
-  return res.json() as Promise<{
-    iss: string; sub: string; aud: string; exp: number; iat: number;
-    name?: string; picture?: string; email?: string;
-  }>;
+  const text = await res.text();
+  if (!res.ok) throw new Error(`verify failed: ${res.status} ${text}`);
+  return JSON.parse(text) as { sub: string };
 }
 
 export async function POST(req: NextRequest) {
   try {
     const { idToken } = await req.json();
-    if (!idToken) return NextResponse.json({ ok: false, message: "no idToken" }, { status: 400 });
+    if (!idToken) {
+      return NextResponse.json({ ok: false, message: "no idToken" }, { status: 400 });
+    }
 
     const decoded = await verifyIdToken(idToken);
-    // decoded.sub が LINEの userId（"U..."）
     const lineUserId = decoded.sub;
     const tenantId = "demo-tenant";
-
-    // 3日後
     const endAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
 
-    // Trial + Journey
     const trial = await prisma.trialGrant.upsert({
       where: { lineUserId },
       update: { tenantId, endAt },
@@ -50,7 +45,8 @@ export async function POST(req: NextRequest) {
     }
 
     const token = signTrialToken({ journeyId: journey.id, tenantId }, 60);
-    const redirectUrl = `${process.env.NEXT_PUBLIC_APP_URL}/trial?token=${encodeURIComponent(token)}`;
+    const base = process.env.NEXT_PUBLIC_APP_URL || "https://sokkuri.onrender.com";
+    const redirectUrl = `${base}/trial?token=${encodeURIComponent(token)}`;
 
     await prisma.auditLog.create({
       data: { journeyId: journey.id, action: "STATE_CHANGE", toStatus: "TRIAL_ACTIVE", note: "LIFF entry" },
@@ -58,7 +54,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ok: true, redirectUrl });
   } catch (e: any) {
-    console.error("liff trial-entry error:", e);
+    console.error("liff trial-entry error:", e?.message || e);
     return NextResponse.json({ ok: false, message: e?.message || "error" }, { status: 400 });
   }
 }

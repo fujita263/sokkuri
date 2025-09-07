@@ -1,5 +1,9 @@
 "use client";
+
 import { useEffect, useState } from "react";
+
+export const dynamic = "force-static";   // SSRで動的処理をしない
+export const revalidate = 0;             // キャッシュ無効で常に新しいJSを配る
 
 export default function LiffTrial() {
   const [err, setErr] = useState<string | null>(null);
@@ -7,9 +11,16 @@ export default function LiffTrial() {
   useEffect(() => {
     (async () => {
       try {
+        // 環境変数の事前チェック（undefinedだと即502の原因になりがち）
+        const liffId = process.env.NEXT_PUBLIC_LIFF_ID;
+        if (!liffId) throw new Error("LIFF ID missing (NEXT_PUBLIC_LIFF_ID)");
+
         const liff = (await import("@line/liff")).default;
-        await liff.init({ liffId: process.env.NEXT_PUBLIC_LIFF_ID! });
-        if (!liff.isLoggedIn()) { liff.login(); return; }
+        await liff.init({ liffId });
+        if (!liff.isLoggedIn()) {
+          liff.login();
+          return;
+        }
 
         const idToken = liff.getIDToken();
         if (!idToken) throw new Error("ID token not found");
@@ -18,24 +29,27 @@ export default function LiffTrial() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ idToken }),
-        }).then(r => r.json());
+        });
+        const data = await res.json();
+        if (!data?.ok) throw new Error(data?.message || "trial-entry failed");
 
-        if (!res?.ok) throw new Error(res?.message || "failed");
-        location.href = res.redirectUrl; // /trial?token=...
+        location.href = data.redirectUrl;
       } catch (e: any) {
+        console.error("LIFF error:", e);
         setErr(e?.message || "unknown error");
       }
     })();
   }, []);
 
   return (
-    <main style={{maxWidth:640,margin:"40px auto",padding:16}}>
-      <h1>お試し準備中…</h1>
-      <p>LINE連携の確認をしています。</p>
-      {err && <>
-        <p style={{color:"crimson"}}>エラー: {err}</p>
-        <p>開けない場合は外部ブラウザで <code>/liff/trial</code> を再読み込みしてください。</p>
-      </>}
+    <main style={{ maxWidth: 640, margin: "40px auto", padding: 16 }}>
+      <h1>お試しの準備中です…</h1>
+      <p>LINEアカウントを確認しています。数秒お待ちください。</p>
+      {err && (
+        <p style={{ color: "crimson", marginTop: 8 }}>
+          エラー: {err}
+        </p>
+      )}
     </main>
   );
 }
