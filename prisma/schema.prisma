@@ -151,3 +151,13 @@ model AuditLog {
 
   @@index([journeyId, createdAt])
 }
+
+model StripeEvent {
+  id        String   @id @default(cuid())
+  eventId   String   @unique // Stripeのevent.id（ユニークで二重実行を防ぐ）
+  type      String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  @@index([type, createdAt])
+}

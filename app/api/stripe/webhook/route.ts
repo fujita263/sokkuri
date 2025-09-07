@@ -1,208 +1,98 @@
 import { NextRequest, NextResponse } from "next/server";
-import { headers } from "next/headers";
 import Stripe from "stripe";
-import { stripe } from "@/lib/stripe";
 import { prisma } from "@/lib/prisma";
 import { SubscriptionStatus } from "@prisma/client";
 
-// Webhook は常に動的実行にし、キャッシュやプリレンダーを無効化
+// Webhookはraw body必須 → Node runtime固定
+export const runtime = "nodejs";
+// 事前計算/キャッシュ無効化（保険）
 export const dynamic = "force-dynamic";
 
-const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: "2024-06-20" });
+const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!;
 
-// Helpers: 軽いリトライで Stripe 側の伝播遅延やイベント順序を吸収
-async function wait(delayMs: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, delayMs));
-}
+/** ちょい待機 */
+const wait = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-async function retrieveSubscriptionWithRetry(
-  subscriptionId: string,
-  maxAttempts = 4,
-  delayMs = 700
-): Promise<Stripe.Subscription | null> {
-  let last: Stripe.Subscription | null = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+/** Subscriptionを少し待ちながら取得（current_period_endが乗るのを待つ） */
+async function retrieveSubscriptionWithRetry(subscriptionId: string, maxAttempts = 4, delayMs = 700) {
+  let sub: Stripe.Subscription | null = null;
+  for (let i = 1; i <= maxAttempts; i++) {
     try {
-      const sub = (await stripe.subscriptions.retrieve(
-        subscriptionId
-      )) as unknown as Stripe.Subscription;
-      last = sub;
-      if ((sub as any)?.current_period_end) return sub;
-    } catch (e) {
-      if (attempt === maxAttempts) {
-        console.warn(
-          "Unable to fetch subscription with retry:",
-          (e as any)?.message || e
-        );
-      }
-    }
-    if (attempt < maxAttempts) await wait(delayMs);
+      sub = await stripe.subscriptions.retrieve(subscriptionId) as unknown as Stripe.Subscription;
+      if ((sub as any)?.current_period_end) break;
+    } catch {}
+    if (i < maxAttempts) await wait(delayMs);
   }
-  return last;
-}
-
-async function backfillCurrentPeriodEndWhenMissing(
-  userId: string,
-  subscriptionId: string,
-  maxAttempts = 8,
-  delayMs = 1500
-): Promise<void> {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const sub = (await retrieveSubscriptionWithRetry(
-      subscriptionId,
-      1,
-      delayMs
-    )) as any;
-    const cpe: number | undefined = sub?.current_period_end;
-    if (cpe) {
-      try {
-        await prisma.subscription.update({
-          where: { userId },
-          data: {
-            currentPeriodEnd: new Date(cpe * 1000),
-          } as any,
-        });
-      } catch {}
-      return;
-    }
-    if (attempt < maxAttempts) await wait(delayMs);
-  }
+  return sub;
 }
 
 export async function POST(req: NextRequest) {
+  // --- 1) constructEvent（署名検証） ---
+  const raw = await req.text();
+  const sig = req.headers.get("stripe-signature");
+  if (!sig) return new Response("missing signature", { status: 400 });
+
+  let evt: Stripe.Event;
   try {
-    const body = await req.text();
-    const signature = headers().get("stripe-signature");
+    evt = stripe.webhooks.constructEvent(raw, sig, webhookSecret);
+  } catch (e: any) {
+    console.error("stripe constructEvent error:", e?.message);
+    return new Response("bad signature", { status: 400 });
+  }
 
-    if (!webhookSecret) {
-      console.error("Missing STRIPE_WEBHOOK_SECRET");
-      return NextResponse.json(
-        { error: "Server misconfigured" },
-        { status: 500 }
-      );
-    }
+  // --- 2) 冪等化（最初に保存。重複なら即終了） ---
+  try {
+    await prisma.stripeEvent.create({
+      data: { eventId: evt.id, type: evt.type, payload: evt as any },
+    });
+  } catch {
+    // Unique制約違反＝同一event再送。業務処理はスキップ
+    return new Response("ok");
+  }
 
-    if (!signature) {
-      return NextResponse.json({ error: "Missing signature" }, { status: 400 });
-    }
-
-    let event: Stripe.Event;
-
-    try {
-      event = stripe.webhooks.constructEvent(body, signature, webhookSecret);
-    } catch (err) {
-      console.error("Webhook signature verification failed:", err);
-      return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
-    }
-
-    // イベントタイプごとに処理
-    switch (event.type) {
+  // --- 3) イベントごとの処理 ---
+  try {
+    switch (evt.type) {
+      // ① 初期費用（1回払い）完了 → INITIAL_PAID へ
       case "checkout.session.completed": {
-        const session = event.data.object as Stripe.Checkout.Session;
-
-        // セッションに必要情報がある場合のみ処理
-        if (
-          session.client_reference_id &&
-          session.customer &&
-          session.subscription
-        ) {
-          const userId = session.client_reference_id as string;
-          const customerId = session.customer as string;
-          const subscriptionId = session.subscription as string;
-
-          // Stripe の Subscription を取得（リトライで current_period_end 取得を安定化）
-          const sub = await retrieveSubscriptionWithRetry(subscriptionId);
-
-          const status =
-            (sub?.status as SubscriptionStatus) ||
-            ("incomplete" as SubscriptionStatus);
-          const currentPeriodEnd = (sub as any)?.current_period_end
-            ? new Date(((sub as any).current_period_end as number) * 1000)
-            : null;
-          const cancelAt = (sub as any)?.cancel_at
-            ? new Date(((sub as any).cancel_at as number) * 1000)
-            : null;
-          const cancelAtPeriodEnd = Boolean((sub as any)?.cancel_at_period_end);
-
-          try {
-            await prisma.subscription.upsert({
-              where: { userId },
-              update: {
-                stripeCustomerId: customerId,
-                stripeSubscriptionId: subscriptionId,
-                status,
-                currentPeriodEnd,
-                cancelAt,
-                cancelAtPeriodEnd,
-              } as any,
-              create: {
-                userId,
-                stripeCustomerId: customerId,
-                stripeSubscriptionId: subscriptionId,
-                status,
-                currentPeriodEnd,
-                cancelAt,
-                cancelAtPeriodEnd,
-              } as any,
+        const s = evt.data.object as Stripe.Checkout.Session;
+        if (s.mode === "payment" && s.payment_status === "paid") {
+          const journeyId = s.metadata?.journeyId;
+          if (journeyId) {
+            await prisma.customerJourney.update({
+              where: { id: journeyId },
+              data: { status: "INITIAL_PAID" },
             });
-            // もし currentPeriodEnd が未確定なら、遅延再取得でバックフィル
-            if (!currentPeriodEnd) {
-              await backfillCurrentPeriodEndWhenMissing(userId, subscriptionId);
-            }
-          } catch (e: any) {
-            // 一意制約衝突などの場合は既存レコードに対して updateMany でフォールバック
-            const msg = e?.message || String(e);
-            console.warn(
-              "Webhook upsert failed; applying fallback update.",
-              msg
-            );
-            await prisma.subscription.updateMany({
-              where: { stripeSubscriptionId: subscriptionId },
-              data: {
-                userId,
-                stripeCustomerId: customerId,
-                status,
-                currentPeriodEnd,
-                cancelAt,
-                cancelAtPeriodEnd,
-              } as any,
+            await prisma.auditLog.create({
+              data: { journeyId, action: "STATE_CHANGE", toStatus: "INITIAL_PAID", note: "init fee paid" },
             });
           }
         }
         break;
       }
 
+      // ②（任意）サブスク作成時の補完
       case "customer.subscription.created": {
-        const created = event.data.object as Stripe.Subscription;
+        const created = evt.data.object as Stripe.Subscription;
         const sub = await retrieveSubscriptionWithRetry(created.id);
-
-        const cancelAt = sub?.cancel_at ? new Date(sub.cancel_at * 1000) : null;
-        const cancelAtPeriodEnd = Boolean(sub?.cancel_at_period_end);
         await prisma.subscription.updateMany({
-          where: { stripeSubscriptionId: (sub ?? created).id },
+          where: { stripeSubscriptionId: created.id },
           data: {
             status: (sub?.status ?? created.status) as SubscriptionStatus,
             currentPeriodEnd: (sub as any)?.current_period_end
-              ? new Date(((sub as any).current_period_end as number) * 1000)
-              : (created as any).current_period_end
-              ? new Date(((created as any).current_period_end as number) * 1000)
+              ? new Date((sub as any).current_period_end * 1000)
               : null,
-            cancelAt,
-            cancelAtPeriodEnd,
+            cancelAt: sub?.cancel_at ? new Date(sub.cancel_at * 1000) : null,
+            cancelAtPeriodEnd: Boolean(sub?.cancel_at_period_end),
           } as any,
         });
-
         break;
       }
 
+      // ③ サブスク更新
       case "customer.subscription.updated": {
-        const subscription = event.data.object as Stripe.Subscription;
-
-        // サブスクリプションのステータス/期日/解約予約を更新
-        const cancelAt = subscription.cancel_at
-          ? new Date(subscription.cancel_at * 1000)
-          : null;
-        const cancelAtPeriodEnd = Boolean(subscription.cancel_at_period_end);
+        const subscription = evt.data.object as Stripe.Subscription;
         await prisma.subscription.updateMany({
           where: { stripeSubscriptionId: subscription.id },
           data: {
@@ -210,87 +100,52 @@ export async function POST(req: NextRequest) {
             currentPeriodEnd: (subscription as any).current_period_end
               ? new Date((subscription as any).current_period_end * 1000)
               : null,
-            cancelAt,
-            cancelAtPeriodEnd,
+            cancelAt: subscription.cancel_at ? new Date(subscription.cancel_at * 1000) : null,
+            cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
           } as any,
         });
-
         break;
       }
 
+      // ④ サブスク削除/キャンセル
       case "customer.subscription.deleted": {
-        const subscription = event.data.object as Stripe.Subscription;
-
-        // サブスクリプションをキャンセル済みに更新（終了日時・キャンセル実行時刻も保存）
-        const canceledAt = (subscription as any).canceled_at
-          ? new Date((subscription as any).canceled_at * 1000)
-          : null;
-        const cpeSeconds =
-          (subscription as any).current_period_end ??
-          (subscription as any).ended_at ??
-          null;
+        const subscription = evt.data.object as Stripe.Subscription;
+        const cpe = (subscription as any).current_period_end ?? (subscription as any).ended_at ?? null;
         await prisma.subscription.updateMany({
           where: { stripeSubscriptionId: subscription.id },
           data: {
             status: "canceled",
-            currentPeriodEnd:
-              typeof cpeSeconds === "number"
-                ? new Date(cpeSeconds * 1000)
-                : null,
-            cancelAt: canceledAt,
+            currentPeriodEnd: typeof cpe === "number" ? new Date(cpe * 1000) : null,
+            cancelAt: (subscription as any).canceled_at ? new Date((subscription as any).canceled_at * 1000) : null,
             cancelAtPeriodEnd: false,
           } as any,
         });
-
         break;
       }
 
+      // ⑤ 請求失敗/成功の反映（任意）
       case "invoice.payment_failed": {
-        const invoice = event.data.object as Stripe.Invoice;
-        const subId =
-          typeof (invoice as any).subscription === "string"
-            ? ((invoice as any).subscription as string)
-            : undefined;
-
+        const invoice = evt.data.object as Stripe.Invoice;
+        const subId = typeof (invoice as any).subscription === "string" ? (invoice as any).subscription as string : undefined;
         if (subId) {
-          // 支払い失敗をログに記録（必要に応じてメール送信などの処理を追加）
-          console.error(`❌ Payment failed for subscription: ${subId}`);
-
-          // サブスクリプションのステータスを更新
-          const sub = (await stripe.subscriptions.retrieve(
-            subId
-          )) as unknown as Stripe.Subscription;
-
+          const sub = await stripe.subscriptions.retrieve(subId) as unknown as Stripe.Subscription;
           await prisma.subscription.updateMany({
             where: { stripeSubscriptionId: sub.id },
-            data: {
-              status: sub.status as SubscriptionStatus,
-            } as any,
+            data: { status: sub.status as SubscriptionStatus } as any,
           });
         }
         break;
       }
-
       case "invoice.payment_succeeded": {
-        const invoice = event.data.object as Stripe.Invoice;
-        const subId =
-          typeof (invoice as any).subscription === "string"
-            ? ((invoice as any).subscription as string)
-            : undefined;
-
+        const invoice = evt.data.object as Stripe.Invoice;
+        const subId = typeof (invoice as any).subscription === "string" ? (invoice as any).subscription as string : undefined;
         if (subId) {
-          // 支払い成功時: ステータスと次回請求日を更新
-          const sub = (await stripe.subscriptions.retrieve(
-            subId
-          )) as unknown as Stripe.Subscription;
-
+          const sub = await stripe.subscriptions.retrieve(subId) as unknown as Stripe.Subscription;
           await prisma.subscription.updateMany({
             where: { stripeSubscriptionId: sub.id },
             data: {
               status: sub.status as SubscriptionStatus,
-              currentPeriodEnd: (sub as any).current_period_end
-                ? new Date((sub as any).current_period_end * 1000)
-                : null,
+              currentPeriodEnd: (sub as any).current_period_end ? new Date((sub as any).current_period_end * 1000) : null,
             } as any,
           });
         }
@@ -298,18 +153,14 @@ export async function POST(req: NextRequest) {
       }
 
       default:
-      // 未処理のイベントタイプは無視
+        // 未対応タイプは何もしない
+        break;
     }
 
     return NextResponse.json({ received: true });
-  } catch (error) {
-    console.error("Webhook error:", error);
-    return NextResponse.json(
-      { error: "Webhook handler failed" },
-      { status: 500 }
-    );
+  } catch (e) {
+    console.error("Webhook handler error:", e);
+    // 業務処理中に落ちても、Stripeの再送に任せるので200返す選択も可
+    return NextResponse.json({ received: true });
   }
 }
-
-// Stripeの生のボディを扱うため、bodyParserを無効化
-export const runtime = "nodejs";
