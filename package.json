@@ -8,9 +8,11 @@
   },
   "scripts": {
     "dev": "next dev -p 3002",
+    "prebuild": "prisma generate",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@line/liff": "^2.27.1",

@@ -1,0 +1,154 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SubscriptionStatus {
+  active
+  trialing
+  past_due
+  canceled
+  incomplete
+  unpaid
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String             @unique // Neon AuthのUser ID
+  stripeCustomerId     String             @unique
+  stripeSubscriptionId String             @unique
+  status               SubscriptionStatus
+  currentPeriodEnd     DateTime?
+  cancelAt             DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+}
+
+// ========= 1) Journey 状態 =========
+enum JourneyStatus {
+  TRIAL_ACTIVE
+  TRIAL_EXPIRED
+  INITIAL_PAID
+  FORM_SUBMITTED
+  AI_HEARING_ACTIVE
+  AI_SUMMARY_READY
+  PROMPT_READY
+  ACTIVE
+}
+
+// ========= 2) コア：顧客進行（FKなし版・最小） =========
+model CustomerJourney {
+  id           String        @id @default(cuid())
+  userId       String? // 将来: User.id を参照
+  tenantId     String // 将来: Tenant.id を参照
+  agentId      String? // 将来: Agent.id を参照
+  status       JourneyStatus @default(TRIAL_ACTIVE)
+  trialGrantId String?       @unique
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  hearingForm HearingForm[]
+  chats       HearingChat[]
+  summaries   HearingSummary[]
+  drafts      PromptDraft[]
+  knowledge   AgentKnowledge[]
+  logs        AuditLog[]
+
+  @@index([tenantId, status])
+}
+
+// ========= 3) 付随テーブル（最小で動く形） =========
+model TrialGrant {
+  id         String   @id @default(cuid())
+  lineUserId String   @unique
+  tenantId   String
+  startAt    DateTime @default(now())
+  endAt      DateTime
+  campaignId String?
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId])
+}
+
+model HearingForm {
+  id                String           @id @default(cuid())
+  journeyId         String
+  answersJson       Json
+  createdAt         DateTime         @default(now())
+  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  customerJourneyId String?
+
+  @@index([journeyId])
+}
+
+model HearingChat {
+  id                String           @id @default(cuid())
+  journeyId         String
+  role              String // "user" | "assistant" | "system"
+  content           String
+  createdAt         DateTime         @default(now())
+  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  customerJourneyId String?
+
+  @@index([journeyId, createdAt])
+}
+
+model HearingSummary {
+  id                String           @id @default(cuid())
+  journeyId         String
+  summaryJson       Json
+  version           Int              @default(1)
+  createdAt         DateTime         @default(now())
+  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  customerJourneyId String?
+
+  @@unique([journeyId, version])
+  @@index([journeyId])
+}
+
+model PromptDraft {
+  id                String           @id @default(cuid())
+  journeyId         String
+  version           Int
+  prevText          String?
+  currentText       String
+  createdAt         DateTime         @default(now())
+  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  customerJourneyId String?
+
+  @@unique([journeyId, version])
+  @@index([journeyId])
+}
+
+model AgentKnowledge {
+  id                String           @id @default(cuid())
+  journeyId         String
+  title             String
+  text              String // 短文化テキスト
+  createdAt         DateTime         @default(now())
+  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  customerJourneyId String?
+
+  @@index([journeyId])
+}
+
+model AuditLog {
+  id                String           @id @default(cuid())
+  journeyId         String
+  actorUserId       String? // 管理者 or 自動
+  action            String // "STATE_CHANGE" | "APPROVE" | "REJECT" | "MAIL_SENT" など
+  fromStatus        JourneyStatus?
+  toStatus          JourneyStatus?
+  note              String?
+  createdAt         DateTime         @default(now())
+  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  customerJourneyId String?
+
+  @@index([journeyId, createdAt])
+}
+
