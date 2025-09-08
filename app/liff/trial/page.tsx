@@ -1,30 +1,60 @@
-// app/liff/trial/page.tsx
 "use client";
-import { useEffect } from "react";
-import liff from "@line/liff";
+import { useEffect, useState } from "react";
 
 export default function LiffTrial() {
+  const [err, setErr] = useState<string | null>(null);
+
   useEffect(() => {
     (async () => {
-      await liff.init({ liffId: process.env.NEXT_PUBLIC_LIFF_ID! });
-      if (!liff.isLoggedIn()) { liff.login(); return; }
-      const idToken = liff.getIDToken();
-      if (!idToken) { liff.logout(); liff.login(); return; }
+      try {
+        const liff = (await import("@line/liff")).default;
+        await liff.init({ liffId: process.env.NEXT_PUBLIC_LIFF_ID! });
 
-      // あなたの既存のバックエンドで検証→トライアル用リンクを返すAPI
-      // （なければ /api/trial/resolve に直接投げてもOK）
-      const r = await fetch("/api/liff/trial-entry", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken }),
-      });
-      const data = await r.json();
+        // 未ログイン or トークン未取得 → ログインへ
+        if (!liff.isLoggedIn()) {
+          liff.login({ redirectUri: window.location.href });
+          return;
+        }
 
-      // サーバが /trial?token=xxx を返す運用なら：
-      const url = data?.url ?? `/trial?token=${encodeURIComponent(idToken)}`;
-      location.replace(url); // ← 履歴を汚さず遷移
+        // 毎回新鮮な id_token を取り直す（キャッシュ前提にしない）
+        const idToken = liff.getIDToken();
+        if (!idToken) {
+          liff.login({ redirectUri: window.location.href });
+          return;
+        }
+
+        const profile = await liff.getProfile();
+
+        const resp = await fetch("/api/liff/trial-entry", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ idToken, displayName: profile.displayName }),
+        });
+
+        // 期限切れなどのときは即リログインで再取得
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          if (data?.code === "ID_TOKEN_EXPIRED" || data?.code === "INVALID_ID_TOKEN") {
+            liff.logout(); // 念のため
+            liff.login({ redirectUri: window.location.href });
+            return;
+          }
+          throw new Error(data?.message || `request failed: ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        window.location.href = data.redirectUrl;
+      } catch (e: any) {
+        setErr(e?.message || "unknown error");
+      }
     })();
   }, []);
 
-  return <main style={{padding:24}}>お試しの準備中です…（LINE認証中）</main>;
+  return (
+    <main style={{ maxWidth: 640, margin: "40px auto", padding: 16 }}>
+      <h1>お試し準備中…</h1>
+      <p>LINEアカウントの確認と初期化を行っています。</p>
+      {err && <p style={{ color: "crimson" }}>エラー: {err}</p>}
+    </main>
+  );
 }
