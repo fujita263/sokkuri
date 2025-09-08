@@ -44,35 +44,37 @@ enum JourneyStatus {
 // ========= 2) コア：顧客進行（FKなし版・最小） =========
 model CustomerJourney {
   id           String        @id @default(cuid())
-  userId       String? // 将来: User.id を参照
-  tenantId     String // 将来: Tenant.id を参照
-  agentId      String? // 将来: Agent.id を参照
+  userId       String?
+  tenantId     String
+  agentId      String?
   status       JourneyStatus @default(TRIAL_ACTIVE)
   trialGrantId String?       @unique
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
-  hearingForm HearingForm[]
-  chats       HearingChat[]
-  summaries   HearingSummary[]
-  drafts      PromptDraft[]
-  knowledge   AgentKnowledge[]
-  logs        AuditLog[]
+  hearingForm HearingForm[]    @relation("Journey_Form")
+  chats       HearingChat[]    @relation("Journey_Chat")
+  summaries   HearingSummary[] @relation("Journey_Summary")
+  drafts      PromptDraft[]    @relation("Journey_Draft")
+  knowledge   AgentKnowledge[] @relation("Journey_Knowledge")
+  logs        AuditLog[]       @relation("Journey_Log")
 
   @@index([tenantId, status])
 }
 
-// ========= 3) 付随テーブル（最小で動く形） =========
+// ========= 3) 付随テーブル =========
 model TrialGrant {
   id         String   @id @default(cuid())
-  lineUserId String   @unique
+  lineUserId String?  @unique          // ← 任意（未連携でもOK）
   tenantId   String
   startAt    DateTime @default(now())
   endAt      DateTime
   campaignId String?
+  userId     String?                   // ← 追加（/trial で find-or-create 用）
   createdAt  DateTime @default(now())
 
   @@index([tenantId])
+  @@index([userId, startAt])
 }
 
 model HearingForm {
@@ -80,7 +82,7 @@ model HearingForm {
   journeyId         String
   answersJson       Json
   createdAt         DateTime         @default(now())
-  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  CustomerJourney   CustomerJourney? @relation(name: "Journey_Form", fields: [customerJourneyId], references: [id])
   customerJourneyId String?
 
   @@index([journeyId])
@@ -92,7 +94,7 @@ model HearingChat {
   role              String // "user" | "assistant" | "system"
   content           String
   createdAt         DateTime         @default(now())
-  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  CustomerJourney   CustomerJourney? @relation(name: "Journey_Chat", fields: [customerJourneyId], references: [id])
   customerJourneyId String?
 
   @@index([journeyId, createdAt])
@@ -104,7 +106,7 @@ model HearingSummary {
   summaryJson       Json
   version           Int              @default(1)
   createdAt         DateTime         @default(now())
-  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  CustomerJourney   CustomerJourney? @relation(name: "Journey_Summary", fields: [customerJourneyId], references: [id])
   customerJourneyId String?
 
   @@unique([journeyId, version])
@@ -118,7 +120,7 @@ model PromptDraft {
   prevText          String?
   currentText       String
   createdAt         DateTime         @default(now())
-  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  CustomerJourney   CustomerJourney? @relation(name: "Journey_Draft", fields: [customerJourneyId], references: [id])
   customerJourneyId String?
 
   @@unique([journeyId, version])
@@ -131,7 +133,7 @@ model AgentKnowledge {
   title             String
   text              String // 短文化テキスト
   createdAt         DateTime         @default(now())
-  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  CustomerJourney   CustomerJourney? @relation(name: "Journey_Knowledge", fields: [customerJourneyId], references: [id])
   customerJourneyId String?
 
   @@index([journeyId])
@@ -146,7 +148,7 @@ model AuditLog {
   toStatus          JourneyStatus?
   note              String?
   createdAt         DateTime         @default(now())
-  CustomerJourney   CustomerJourney? @relation(fields: [customerJourneyId], references: [id])
+  CustomerJourney   CustomerJourney? @relation(name: "Journey_Log", fields: [customerJourneyId], references: [id])
   customerJourneyId String?
 
   @@index([journeyId, createdAt])
@@ -159,19 +161,3 @@ model StripeEvent {
   payload   Json
   createdAt DateTime @default(now())
 }
-
-model TrialGrant {
-  id         String   @id @default(cuid())
-- lineUserId String   @unique
-+ lineUserId String?  @unique            // ← 任意に（未連携でも使える）
-  tenantId   String
-  startAt    DateTime @default(now())
-  endAt      DateTime
-  campaignId String?
-+ userId     String?                     // ← 追加（resolve で使う）
-  createdAt  DateTime @default(now())
-
-  @@index([tenantId])
-+ @@index([userId, startAt])             // ← 検索用
-}
-
