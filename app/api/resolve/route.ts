@@ -44,8 +44,15 @@ export async function GET(req: NextRequest) {
     if (!grant) {
       const end = new Date(now.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
       grant = await prisma.trialGrant.create({
-        data: { userId: user.id, startAt: now, endAt: end, campaignId: "default" },
-      });
+   data: {
+     userId: user.id,
+     tenantId: "demo-tenant",   // ★ 必須
+     startAt: now,
+     endAt: end,
+     campaignId: "default",
+   },
+ });
+
     }
 
     const endAt = grant.endAt;
