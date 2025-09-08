@@ -45,14 +45,11 @@ export async function POST(req: NextRequest) {
     }
 
     const token = signTrialToken({ journeyId: journey.id, tenantId }, 60);
-    const base = process.env.NEXT_PUBLIC_APP_URL || "https://sokkuri.onrender.com";
-    const redirectUrl = `${base}/trial?token=${encodeURIComponent(token)}`;
-
     await prisma.auditLog.create({
       data: { journeyId: journey.id, action: "STATE_CHANGE", toStatus: "TRIAL_ACTIVE", note: "LIFF entry" },
     });
 
-    return NextResponse.json({ ok: true, redirectUrl });
+    return NextResponse.json({ ok: true, token });
   } catch (e: any) {
     console.error("liff trial-entry error:", e?.message || e);
     return NextResponse.json({ ok: false, message: e?.message || "error" }, { status: 400 });

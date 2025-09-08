@@ -159,3 +159,19 @@ model StripeEvent {
   payload   Json
   createdAt DateTime @default(now())
 }
+
+model TrialGrant {
+  id         String   @id @default(cuid())
+- lineUserId String   @unique
++ lineUserId String?  @unique            // ← 任意に（未連携でも使える）
+  tenantId   String
+  startAt    DateTime @default(now())
+  endAt      DateTime
+  campaignId String?
++ userId     String?                     // ← 追加（resolve で使う）
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId])
++ @@index([userId, startAt])             // ← 検索用
+}
+
